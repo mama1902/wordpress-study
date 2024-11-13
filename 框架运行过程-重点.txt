@@ -1,0 +1,193 @@
+三个阶段
+
+首先，我们先整体了解下wordpress的三个主要流程：初始化(资源加载)、准备数据和渲染。
+
+我们都知道，wordpress的主入口文件是index.php。在 index.php 中 引入了文件 wp-blog-header.php 。
+
+// wp-blog-header.php
+if ( ! isset( $wp_did_header ) ) {
+
+$wp_did_header = true;
+
+// Load the WordPress library.
+require_once __DIR__ . '/wp-load.php';
+
+// Set up the WordPress query.
+wp();
+
+// Load the theme template.
+require_once ABSPATH . WPINC . '/template-loader.php';
+
+}
+
+此文件中，即包含了wordpress加载的三个阶段：
+
+资源加载阶段：
+
+require_once __DIR__ . '/wp-load.php';
+
+数据准备阶段：
+
+// Set up the WordPress query.
+wp();
+
+渲染阶段:
+
+// Load the theme template.
+require_once ABSPATH . WPINC . '/template-loader.php';
+
+接下来，我们看看每个阶段所做的事情。
+资源加载阶段
+
+wp-load.php 引入wp-config.php, wp-config.php 引入 wp-settings.php，核心的加载逻辑在 wp-settings.php中。
+
+资源加载阶段，主要是加载所有依赖的PHP库和文件，包括各种核心类，functions，插件 等等。
+
+需要注意的一点是，在wordpress 未安装成功时，是没有wp-config.php这个文件的。
+
+
+数据准备阶段
+
+数据准备阶段的入口是 wp-blog-header.php 中的 wp() 函数；wp函数的定义是在functions.php中；最终会调用到 class-wp.php 中的 main() 方法。
+
+main() 方法主要做三件事情：
+
+parse_request(): 解析请求的参数
+query_posts(): 通过请求的参数查询文章
+register_globals(): 注册全局数据，以便渲染阶段可以获取数据
+
+我们重点关注第2和第3这两个事情。
+
+查询文章
+
+query_posts() 会调用 class-wp-query.php 中的 query() 方法，query() 方法做两件事情：
+
+init(): 重置所有数据
+get_posts(): 查询文章
+
+get_posts() 方法会调用当前类的 parse_query() 方法，此方法接近1000行，是整个wordpress中最核心的逻辑。
+
+parse_query() 逻辑复杂，我们只关注两件事情：
+
+解析请求的数据(get/post)，构造读取/写入的数据和条件，包括
+日期数据
+文章标题
+附件
+。。。。其他条件
+根据url请求参数判断当前请求是哪个页面，例如设置is_home = true，就表示为首页，is_page = true 表示是文章页面；设置当前页面，在数据渲染阶段会用到。
+
+parse_query() 方法查询到的文章，会放到当前类的posts属性和post属性中。如果我们需要debug，可以在此方法的尾部dump查询的sql
+
+var_dump($where . $groupby . $orderby . $limits . $join);
+
+get_posts()执行完毕后，我们也就获取到了想要的文章(根据url参数查询出来的)，然后进入注册全局数据阶段，即 register_globals();
+
+register_globals() 方法的代码相对简单，如下：
+
+public function register_globals() {
+global $wp_query;
+
+// Extract updated query vars back into global namespace.
+foreach ( (array) $wp_query->query_vars as $key => $value ) {
+$GLOBALS[ $key ] = $value;
+}
+
+$GLOBALS['query_string'] = $this->query_string;
+$GLOBALS['posts']        = & $wp_query->posts;
+$GLOBALS['post']         = isset( $wp_query->post ) ? $wp_query->post : null;
+$GLOBALS['request']      = $wp_query->request;
+
+if ( $wp_query->is_single() || $wp_query->is_page() ) {
+$GLOBALS['more']   = 1;
+$GLOBALS['single'] = 1;
+}
+
+if ( $wp_query->is_author() && isset( $wp_query->post ) ) {
+$GLOBALS['authordata'] = get_userdata( $wp_query->post->post_author );
+}
+}
+
+其中主要的为：
+
+$GLOBALS['posts'] = & $wp_query->posts;
+$GLOBALS['post']  = isset( $wp_query->post ) ? $wp_query->post : null;
+
+这两行代码将上一步查询到的文章和文章的列表，放入了$GLOBALS中，在渲染阶段，会从 $GLOBALS 读取文章内容。
+渲染阶段
+
+入口为 template-loader.php 文件，会先判断当前请求的是哪个页面，在数据准备阶段中的 parse_query() 已经计算出来了。核心代码如下:
+
+$tag_templates = array(
+'is_embed'             => 'get_embed_template',
+'is_404'               => 'get_404_template',
+'is_search'            => 'get_search_template',
+'is_front_page'        => 'get_front_page_template',
+'is_home'              => 'get_home_template',
+'is_privacy_policy'    => 'get_privacy_policy_template',
+'is_post_type_archive' => 'get_post_type_archive_template',
+'is_tax'               => 'get_taxonomy_template',
+'is_attachment'        => 'get_attachment_template',
+'is_single'            => 'get_single_template',
+'is_page'              => 'get_page_template',
+'is_singular'          => 'get_singular_template',
+'is_category'          => 'get_category_template',
+'is_tag'               => 'get_tag_template',
+'is_author'            => 'get_author_template',
+'is_date'              => 'get_date_template',
+'is_archive'           => 'get_archive_template',
+);
+$template      = false;
+
+// Loop through each of the template conditionals, and find the appropriate template file.
+foreach ( $tag_templates as $tag => $template_getter ) {
+if ( call_user_func( $tag ) ) {
+$template = call_user_func( $template_getter );
+}
+
+if ( $template ) {
+if ( 'is_attachment' === $tag ) {
+remove_filter( 'the_content', 'prepend_attachment' );
+}
+
+break;
+}
+}
+
+if ( ! $template ) {
+$template = get_index_template();
+}
+
+$tag_templates 数组中的 key, 其实是一个回调函数，全部定义在 wp-includes/query.php中，实际调用的方法是 class-wp-query.php 中对应的方法名。
+
+在计算出当前页面后，就根据当前配置的主题，去加载主题下的模板文件。
+
+
+在模板文件中，我们就可以获取到之前准备好的数据($GLOBALS中的数据)。以文章内容为例，
+
+在模板中，调用the_content()方法，the_content()方法定义在post-template.php中，the_content() 再调用 get_the_content()， get_the_content() 调用 post.php 中的 get_post()， get_post()定义如下:
+
+function get_post( $post = null, $output = OBJECT, $filter = 'raw' ) {
+if ( empty( $post ) && isset( $GLOBALS['post'] ) ) {
+$post = $GLOBALS['post'];
+}
+
+if ( $post instanceof WP_Post ) {
+$_post = $post;
+}
+// 其他代码 .....
+return $_post;
+}
+
+方法的第一行就用 $GLOBALS 中取到了之前准备好的文章数据。
+
+拿到文章数据后，get_the_content() 方法会对文章数据进行组装，返回给 the_content() , 由the_content() 方法进行输出。
+总结
+
+到此，我们将这个wordpress的加载流程梳理一下，希望对大家在看源码时有所帮助。源码中还有很多细节需要自行梳理，在梳理时，需要注意的就是global的使用
+
+wp_options  配置表
+seo设置  固定链接
+调试
+localhost:8000 -t 模式
+路由到cart
+wc_get_template( 'cart/cart.php' );
